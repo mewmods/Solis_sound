@@ -2,7 +2,7 @@
 
 Sistema de música completo para servidores **FiveM**, com **motor de áudio próprio** (sem `xsound`/`interact-sound`), **sessões espaciais autoritativas no servidor**, **Jam**, playlists e interface própria em NUI.
 
-`Versão 2.0.0` · `FiveM / GTA V` · `oxmysql` · **vRP (solis/zirix)**, **QBCore**, **ESX** ou **standalone**
+`Versão 2.0.0` · `FiveM / GTA V` · `oxmysql` · **vRP (solis/zirix/creative)**, **QBCore**, **ESX** ou **standalone**
 
 ---
 
