@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Solis YouTube</title>
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+    <style>
+        html, body { margin: 0; background: #000; overflow: hidden; }
+        iframe { width: 100%; height: 100%; border: 0; display: block; }
+    </style>
+</head>
+<body>
+    <div id="player"></div>
+
+    <script>
+        function queryParams() {
+            var params = {};
+            var query = window.location.search.replace(/^[?]/, '');
+            query.split('&').forEach(function (pair) {
+                if (!pair) return;
+                var parts = pair.split('=');
+                params[decodeURIComponent(parts[0])] = decodeURIComponent(parts[1] || '');
+            });
+            return params;
+        }
+
+        function videoId(url) {
+            if (!url) return '';
+            var match = url.match(/(?:youtu\.be\/|[?&]v=|\/embed\/|\/shorts\/|\/live\/)([A-Za-z0-9_-]{11})/);
+            return match ? match[1] : '';
+        }
+
+        var params = queryParams();
+        var vid = videoId(params.url);
+        var soundId = params.id || '';
+
+        // O erro chega depois do polling do motor já ter desistido: avisa o pai.
+        function reportError(code) {
+            try { parent.postMessage({ t: 'yt:error', id: soundId, code: code }, '*'); } catch (e) { }
+        }
+
+        window.yPlayerError = 0;
+        window.yPlayer = null;
+
+        var frame = null;
+        var ready = false;
+        var state = -1;
+        var duration = 0;
+        var currentTime = 0;
+        var volume = 0;
+        var listeners = { onStateChange: [], onReady: [] };
+        var commandQueue = [];
+        var handshake = null;
+
+        function emit(name, payload) {
+            (listeners[name] || []).forEach(function (fn) {
+                try { fn(payload); } catch (e) { }
+            });
+        }
+
+        function post(message) {
+            if (!frame || !frame.contentWindow) return;
+            try { frame.contentWindow.postMessage(JSON.stringify(message), '*'); } catch (e) { }
+        }
+
+        // O player só entrega eventos (infoDelivery) depois do handshake.
+        function listen() {
+            post({ event: 'listening', id: 1, channel: 'widget' });
+        }
+
+        function command(func, args) {
+            if (!ready) { commandQueue.push([func, args]); return; }
+
+            if (func === 'setVolume' && args && args[0] > 0) {
+                post({ event: 'command', func: 'unMute', args: [], id: 2 });
+            }
+
+            post({ event: 'command', func: func, args: args || [], id: 2 });
+        }
+
+        function flush() {
+            var queue = commandQueue;
+            commandQueue = [];
+            queue.forEach(function (item) { command(item[0], item[1]); });
+        }
+
+        function handle(data) {
+            var payload = data;
+            if (!payload || !payload.event) return;
+
+            var info = payload.info;
+
+            if (payload.event === 'onReady') {
+                ready = true;
+
+                if (handshake) {
+                    clearInterval(handshake);
+                    handshake = null;
+                }
+
+                listen();
+                // Mudo até o motor mandar o volume: garante o autoplay do CEF.
+                post({ event: 'command', func: 'mute', args: [], id: 3 });
+                flush();
+                emit('onReady', { target: window.yPlayer });
+                return;
+            }
+
+            if (payload.event === 'onError') {
+                window.yPlayerError = info;
+                reportError(info);
+                return;
+            }
+
+            if (payload.event === 'onStateChange') {
+                state = typeof info === 'number' ? info : (info && info.playerState);
+                emit('onStateChange', { data: state, target: window.yPlayer });
+                return;
+            }
+
+            if (payload.event === 'infoDelivery' && info) {
+                if (typeof info.duration === 'number' && info.duration > 0) duration = info.duration;
+                if (typeof info.currentTime === 'number') currentTime = info.currentTime;
+
+                if (typeof info.playerState === 'number' && info.playerState !== state) {
+                    state = info.playerState;
+                    emit('onStateChange', { data: state, target: window.yPlayer });
+                }
+            }
+        }
+
+        window.addEventListener('message', function (event) {
+            var data = event.data;
+            if (typeof data === 'string') {
+                try { data = JSON.parse(data); } catch (e) { return; }
+            }
+            handle(data);
+        });
+
+        // Fachada compatível com a API do YouTube usada pelo motor de áudio.
+        window.yPlayer = {
+            _facade: true,
+            addEventListener: function (name, fn) {
+                (listeners[name] = listeners[name] || []).push(fn);
+
+                if (name === 'onStateChange' && state !== -1) {
+                    setTimeout(function () { try { fn({ data: state, target: window.yPlayer }); } catch (e) { } }, 0);
+                }
+                if (name === 'onReady' && ready) {
+                    setTimeout(function () { try { fn({ target: window.yPlayer }); } catch (e) { } }, 0);
+                }
+            },
+            playVideo: function () { command('playVideo'); },
+            pauseVideo: function () { command('pauseVideo'); },
+            stopVideo: function () { command('stopVideo'); },
+            mute: function () { command('mute'); },
+            unMute: function () { command('unMute'); },
+            setVolume: function (v) { volume = v; command('setVolume', [Math.max(0, Math.min(100, Math.round(v)))]); },
+            getVolume: function () { return volume; },
+            getDuration: function () { return duration; },
+            getCurrentTime: function () { return currentTime; },
+            seekTo: function (t, allowSeekAhead) { command('seekTo', [t || 0, allowSeekAhead !== false]); },
+            getPlayerState: function () { return state; }
+        };
+
+        if (vid) {
+            var embed = new URL('https://www.youtube.com/embed/' + vid);
+
+            embed.searchParams.set('autoplay', '1');
+            embed.searchParams.set('controls', '0');
+            embed.searchParams.set('enablejsapi', '1');
+            embed.searchParams.set('rel', '0');
+            embed.searchParams.set('playsinline', '1');
+            embed.searchParams.set('iv_load_policy', '3');
+            embed.searchParams.set('modestbranding', '1');
+
+            // widget_referrer é a identidade exigida pelo YouTube (é o que mata o
+            // Error 153 quando o CEF não manda Referer). origin é a validação das
+            // mensagens: precisa ser a origem DESTA página, senão o player ignora
+            // o handshake e nunca devolve onReady/infoDelivery.
+            embed.searchParams.set('widget_referrer', 'https://www.youtube.com');
+
+            if (window.location.origin && window.location.origin !== 'null') {
+                embed.searchParams.set('origin', window.location.origin);
+            }
+
+            if (params.t) embed.searchParams.set('start', params.t);
+
+            frame = document.createElement('iframe');
+            frame.id = 'yt-frame';
+            frame.src = embed.toString();
+            frame.setAttribute('frameborder', '0');
+            frame.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture');
+            frame.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+            frame.setAttribute('allowfullscreen', 'true');
+
+            frame.addEventListener('load', listen);
+            document.getElementById('player').appendChild(frame);
+
+            // Handshake repetido: o player só começa a mandar infoDelivery depois
+            // de receber o listening, e o iframe demora a subir dentro do CEF.
+            handshake = setInterval(listen, 900);
+            setTimeout(function () { if (handshake) { clearInterval(handshake); handshake = null; } }, 20000);
+
+            window.__diag = {
+                origin: window.location.origin,
+                referrer: document.referrer,
+                get ready() { return ready; },
+                get state() { return state; },
+                get duration() { return duration; },
+                get error() { return window.yPlayerError; }
+            };
+        }
+
+        window.clearMe = function () {
+            if (handshake) { clearInterval(handshake); handshake = null; }
+            if (frame && frame.parentNode) frame.parentNode.removeChild(frame);
+            frame = null;
+        };
+    </script>
+</body>
+</html>
